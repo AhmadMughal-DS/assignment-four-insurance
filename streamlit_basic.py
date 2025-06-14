@@ -12,6 +12,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 import mlflow
 import mlflow.sklearn
 from datetime import datetime
+import os
 
 # Set page config with a beautiful theme
 st.set_page_config(
@@ -21,9 +22,16 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize MLflow
-mlflow.set_tracking_uri("http://localhost:5000")
-mlflow.set_experiment("Insurance Cost Prediction")
+# Initialize MLflow with error handling
+try:
+    # Get MLflow tracking URI from environment variable or use default
+    mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI', 'http://localhost:5000')
+    mlflow.set_tracking_uri(mlflow_tracking_uri)
+    mlflow.set_experiment("Insurance Cost Prediction")
+    mlflow_available = True
+except Exception as e:
+    st.warning("MLflow tracking is not available. Running without experiment tracking.")
+    mlflow_available = False
 
 # Custom CSS for better styling
 st.markdown("""
@@ -73,44 +81,75 @@ tab1, tab2, tab3, tab4 = st.tabs(["🤖 Model Training", "📊 Data Analysis", "
 
 # Function to train model with MLflow tracking
 def train_model(model_name, X_train, X_test, y_train, y_test):
-    with mlflow.start_run(run_name=f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
-        # Log parameters
-        mlflow.log_param("test_size", test_size)
-        mlflow.log_param("random_state", random_state)
-        mlflow.log_param("model_type", model_name)
-        
-        # Create and train model
-        if model_name == "linear_regression":
-            model = LinearRegression()
-        elif model_name == "ridge_regression":
-            model = Ridge()
-        else:  # random_forest
-            model = RandomForestRegressor(random_state=random_state)
-        
-        # Train model
-        model.fit(X_train, y_train)
-        
-        # Make predictions
-        y_pred = model.predict(X_test)
-        
-        # Calculate metrics
-        mse = mean_squared_error(y_test, y_pred)
-        r2 = r2_score(y_test, y_pred)
-        
-        # Log metrics
-        mlflow.log_metric("mse", mse)
-        mlflow.log_metric("r2_score", r2)
-        
-        # Log model
-        mlflow.sklearn.log_model(model, model_name)
-        
-        return {
-            'model': model,
-            'metrics': {
-                'mse': mse,
-                'r2_score': r2
-            }
+    if mlflow_available:
+        try:
+            with mlflow.start_run(run_name=f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+                # Log parameters
+                mlflow.log_param("test_size", test_size)
+                mlflow.log_param("random_state", random_state)
+                mlflow.log_param("model_type", model_name)
+                
+                # Create and train model
+                if model_name == "linear_regression":
+                    model = LinearRegression()
+                elif model_name == "ridge_regression":
+                    model = Ridge()
+                else:  # random_forest
+                    model = RandomForestRegressor(random_state=random_state)
+                
+                # Train model
+                model.fit(X_train, y_train)
+                
+                # Make predictions
+                y_pred = model.predict(X_test)
+                
+                # Calculate metrics
+                mse = mean_squared_error(y_test, y_pred)
+                r2 = r2_score(y_test, y_pred)
+                
+                # Log metrics
+                mlflow.log_metric("mse", mse)
+                mlflow.log_metric("r2_score", r2)
+                
+                # Log model
+                mlflow.sklearn.log_model(model, model_name)
+                
+                return {
+                    'model': model,
+                    'metrics': {
+                        'mse': mse,
+                        'r2_score': r2
+                    }
+                }
+        except Exception as e:
+            st.warning(f"MLflow tracking failed: {str(e)}. Continuing without tracking.")
+            mlflow_available = False
+    
+    # If MLflow is not available or failed, train without tracking
+    if model_name == "linear_regression":
+        model = LinearRegression()
+    elif model_name == "ridge_regression":
+        model = Ridge()
+    else:  # random_forest
+        model = RandomForestRegressor(random_state=random_state)
+    
+    # Train model
+    model.fit(X_train, y_train)
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    
+    # Calculate metrics
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    
+    return {
+        'model': model,
+        'metrics': {
+            'mse': mse,
+            'r2_score': r2
         }
+    }
 
 with tab1:
     st.header("🤖 Model Training")
