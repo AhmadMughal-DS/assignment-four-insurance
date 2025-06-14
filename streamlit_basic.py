@@ -23,6 +23,7 @@ st.set_page_config(
 )
 
 # Initialize MLflow with error handling
+mlflow_available = False
 try:
     # Get MLflow tracking URI from environment variable or use default
     mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI', 'http://localhost:5000')
@@ -31,7 +32,6 @@ try:
     mlflow_available = True
 except Exception as e:
     st.warning("MLflow tracking is not available. Running without experiment tracking.")
-    mlflow_available = False
 
 # Custom CSS for better styling
 st.markdown("""
@@ -81,6 +81,8 @@ tab1, tab2, tab3, tab4 = st.tabs(["🤖 Model Training", "📊 Data Analysis", "
 
 # Function to train model with MLflow tracking
 def train_model(model_name, X_train, X_test, y_train, y_test):
+    global mlflow_available
+    
     if mlflow_available:
         try:
             with mlflow.start_run(run_name=f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
