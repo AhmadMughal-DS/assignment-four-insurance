@@ -9,6 +9,9 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
+import mlflow
+import mlflow.sklearn
+from datetime import datetime
 
 # Set page config with a beautiful theme
 st.set_page_config(
@@ -17,6 +20,10 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Initialize MLflow
+mlflow.set_tracking_uri("http://localhost:5000")
+mlflow.set_experiment("Insurance Cost Prediction")
 
 # Custom CSS for better styling
 st.markdown("""
@@ -64,27 +71,46 @@ with st.sidebar:
 # Create tabs with emojis
 tab1, tab2, tab3, tab4 = st.tabs(["🤖 Model Training", "📊 Data Analysis", "🔍 Feature Insights", "🎯 Predictions"])
 
-# Function to train model locally
+# Function to train model with MLflow tracking
 def train_model(model_name, X_train, X_test, y_train, y_test):
-    if model_name == "linear_regression":
-        model = LinearRegression()
-    elif model_name == "ridge_regression":
-        model = Ridge()
-    else:  # random_forest
-        model = RandomForestRegressor(random_state=random_state)
-    
-    model.fit(X_train, y_train)
-    y_pred = model.predict(X_test)
-    mse = mean_squared_error(y_test, y_pred)
-    r2 = r2_score(y_test, y_pred)
-    
-    return {
-        'model': model,
-        'metrics': {
-            'mse': mse,
-            'r2_score': r2
+    with mlflow.start_run(run_name=f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
+        # Log parameters
+        mlflow.log_param("test_size", test_size)
+        mlflow.log_param("random_state", random_state)
+        mlflow.log_param("model_type", model_name)
+        
+        # Create and train model
+        if model_name == "linear_regression":
+            model = LinearRegression()
+        elif model_name == "ridge_regression":
+            model = Ridge()
+        else:  # random_forest
+            model = RandomForestRegressor(random_state=random_state)
+        
+        # Train model
+        model.fit(X_train, y_train)
+        
+        # Make predictions
+        y_pred = model.predict(X_test)
+        
+        # Calculate metrics
+        mse = mean_squared_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        
+        # Log metrics
+        mlflow.log_metric("mse", mse)
+        mlflow.log_metric("r2_score", r2)
+        
+        # Log model
+        mlflow.sklearn.log_model(model, model_name)
+        
+        return {
+            'model': model,
+            'metrics': {
+                'mse': mse,
+                'r2_score': r2
+            }
         }
-    }
 
 with tab1:
     st.header("🤖 Model Training")
