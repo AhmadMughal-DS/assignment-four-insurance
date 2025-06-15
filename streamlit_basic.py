@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 import mlflow
 import mlflow.sklearn
+import joblib
 from datetime import datetime
 import os
 
@@ -32,6 +33,48 @@ try:
     mlflow_available = True
 except Exception as e:
     st.warning("MLflow tracking is not available. Running without experiment tracking.")
+
+# Function to save model individually
+def save_model_separately(model, model_name):
+    try:
+        # Create models directory if it doesn't exist
+        os.makedirs("models", exist_ok=True)
+        
+        # Save the model with a specific filename
+        model_path = f"models/{model_name}.joblib"
+        joblib.dump(model, model_path)
+        st.info(f"Model saved to {model_path}")
+    except Exception as e:
+        st.warning(f"Could not save model: {str(e)}")
+
+# Function to load saved model
+def load_saved_model(model_name):
+    try:
+        # Check if there's a specific saved model file for this model type
+        model_paths = {
+            "linear_regression": "models/linear_regression.joblib",
+            "ridge_regression": "models/ridge_regression.joblib", 
+            "random_forest": "models/random_forest.joblib"
+        }
+        
+        # First try to load from models directory
+        if model_name in model_paths and os.path.exists(model_paths[model_name]):
+            import joblib
+            model = joblib.load(model_paths[model_name])
+            st.success(f"Successfully loaded saved {model_name} model!")
+            return model
+            
+        # Fallback: try to load from MLflow artifacts (but this loads same model for all)
+        # We'll disable this to force training fresh models
+        # model_path = f"mlruns/606562906264104841/b7c3ccd120a3471b8be5e905d112c3fb/artifacts/insurance_model"
+        # if os.path.exists(model_path):
+        #     model = mlflow.sklearn.load_model(model_path)
+        #     st.success(f"Successfully loaded saved {model_name} model!")
+        #     return model
+            
+    except Exception as e:
+        st.warning(f"Could not load saved model: {str(e)}")
+    return None
 
 # Custom CSS for better styling
 st.markdown("""
@@ -83,6 +126,25 @@ tab1, tab2, tab3, tab4 = st.tabs(["🤖 Model Training", "📊 Data Analysis", "
 def train_model(model_name, X_train, X_test, y_train, y_test):
     global mlflow_available
     
+    # First try to load the saved model
+    saved_model = load_saved_model(model_name)
+    if saved_model is not None:
+        # Make predictions with saved model
+        y_pred = saved_model.predict(X_test)
+        
+        # Calculate metrics
+        mse = mean_squared_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        
+        return {
+            'model': saved_model,
+            'metrics': {
+                'mse': mse,
+                'r2_score': r2
+            }
+        }
+    
+    # If no saved model, train a new one
     if mlflow_available:
         try:
             with mlflow.start_run(run_name=f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
@@ -112,9 +174,11 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
                 # Log metrics
                 mlflow.log_metric("mse", mse)
                 mlflow.log_metric("r2_score", r2)
-                
-                # Log model
+                  # Log model
                 mlflow.sklearn.log_model(model, model_name)
+                
+                # Save model separately for future use
+                save_model_separately(model, model_name)
                 
                 return {
                     'model': model,
@@ -137,13 +201,15 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
     
     # Train model
     model.fit(X_train, y_train)
-    
-    # Make predictions
+      # Make predictions
     y_pred = model.predict(X_test)
     
     # Calculate metrics
     mse = mean_squared_error(y_test, y_pred)
     r2 = r2_score(y_test, y_pred)
+    
+    # Save model separately for future use
+    save_model_separately(model, model_name)
     
     return {
         'model': model,
