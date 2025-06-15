@@ -43,25 +43,26 @@ def save_model_separately(model, model_name):
         # Save the model with a specific filename
         model_path = f"models/{model_name}.joblib"
         joblib.dump(model, model_path)
-        st.info(f"Model saved to {model_path}")
+        # st.success(f"💾 Model saved to {model_path}")  # Remove this to avoid duplicate messages
     except Exception as e:
         st.warning(f"Could not save model: {str(e)}")
 
 # Function to load saved model
-def load_saved_model(model_name):
+def load_saved_model(model_name, use_saved=True):
+    if not use_saved:
+        return None
+        
     try:
         # Check if there's a specific saved model file for this model type
         model_paths = {
             "linear_regression": "models/linear_regression.joblib",
             "ridge_regression": "models/ridge_regression.joblib", 
             "random_forest": "models/random_forest.joblib"
-        }
-        
-        # First try to load from models directory
+        }        # First try to load from models directory
         if model_name in model_paths and os.path.exists(model_paths[model_name]):
             import joblib
             model = joblib.load(model_paths[model_name])
-            st.success(f"Successfully loaded saved {model_name} model!")
+            # st.info(f"✅ Loaded saved {model_name} model from models folder!")  # Remove this duplicate message
             return model
             
         # Fallback: try to load from MLflow artifacts (but this loads same model for all)
@@ -116,6 +117,11 @@ df = load_data()
 # Sidebar for parameters with better styling
 with st.sidebar:
     st.header("⚙️ Model Parameters")
+    
+    # Option to use saved models or train fresh
+    use_saved_models = st.checkbox("Use Saved Models", value=True, 
+                                  help="Uncheck to train fresh models instead of using saved ones")
+    
     test_size = st.slider("Test Size", 0.1, 0.4, 0.2, 0.05)
     random_state = st.number_input("Random State", 1, 100, 42)
 
@@ -123,11 +129,17 @@ with st.sidebar:
 tab1, tab2, tab3, tab4 = st.tabs(["🤖 Model Training", "📊 Data Analysis", "🔍 Feature Insights", "🎯 Predictions"])
 
 # Function to train model with MLflow tracking
-def train_model(model_name, X_train, X_test, y_train, y_test):
+def train_model(model_name, X_train, X_test, y_train, y_test, use_saved=True):
     global mlflow_available
     
-    # First try to load the saved model
-    saved_model = load_saved_model(model_name)
+    # Show what we're trying to do (remove this to avoid duplicate messages)
+    # if use_saved:
+    #     st.info(f"🔍 Checking for saved {model_name} model...")
+    # else:
+    #     st.info(f"🆕 Training fresh {model_name} model...")
+    
+    # First try to load the saved model (only if use_saved is True)
+    saved_model = load_saved_model(model_name, use_saved)
     if saved_model is not None:
         # Make predictions with saved model
         y_pred = saved_model.predict(X_test)
@@ -141,8 +153,12 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
             'metrics': {
                 'mse': mse,
                 'r2_score': r2
-            }
+            },
+            'was_loaded': True  # Add flag to indicate model was loaded
         }
+    
+    # If we reach here, we need to train a fresh model
+    # st.info(f"🔄 Training fresh {model_name} model...")  # Remove this duplicate message
     
     # If no saved model, train a new one
     if mlflow_available:
@@ -170,8 +186,7 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
                 # Calculate metrics
                 mse = mean_squared_error(y_test, y_pred)
                 r2 = r2_score(y_test, y_pred)
-                
-                # Log metrics
+                  # Log metrics
                 mlflow.log_metric("mse", mse)
                 mlflow.log_metric("r2_score", r2)
                   # Log model
@@ -185,7 +200,8 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
                     'metrics': {
                         'mse': mse,
                         'r2_score': r2
-                    }
+                    },
+                    'was_loaded': False  # Fresh training with MLflow
                 }
         except Exception as e:
             st.warning(f"MLflow tracking failed: {str(e)}. Continuing without tracking.")
@@ -207,8 +223,7 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
     # Calculate metrics
     mse = mean_squared_error(y_test, y_pred)
     r2 = r2_score(y_test, y_pred)
-    
-    # Save model separately for future use
+      # Save model separately for future use
     save_model_separately(model, model_name)
     
     return {
@@ -216,7 +231,8 @@ def train_model(model_name, X_train, X_test, y_train, y_test):
         'metrics': {
             'mse': mse,
             'r2_score': r2
-        }
+        },
+        'was_loaded': False  # Fresh training without MLflow
     }
 
 with tab1:
@@ -232,20 +248,22 @@ with tab1:
     
     # Dictionary to store model results
     if 'model_results' not in st.session_state:
-        st.session_state.model_results = {}
-    
-    # Linear Regression Model
+        st.session_state.model_results = {}    # Linear Regression Model
     with col1:
         st.subheader("📈 Linear Regression")
         if st.button("Train Linear Regression"):
-            with st.spinner("Training Linear Regression..."):
-                result = train_model("linear_regression", X_train, X_test, y_train, y_test)
+            with st.spinner("Processing Linear Regression..."):
+                result = train_model("linear_regression", X_train, X_test, y_train, y_test, use_saved_models)
                 st.session_state.model_results['Linear Regression'] = {
                     'model': result['model'],
                     'mse': result['metrics']['mse'],
                     'r2_score': result['metrics']['r2_score']
                 }
-                st.success("Linear Regression trained successfully!")
+                # Show appropriate message based on what happened
+                if result.get('was_loaded', False):
+                    st.success("✅ Linear Regression model loaded from saved file!")
+                else:
+                    st.success("🆕 Linear Regression trained successfully!")
                 st.metric("MSE", f"{result['metrics']['mse']:.2f}")
                 st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
     
@@ -253,14 +271,18 @@ with tab1:
     with col2:
         st.subheader("📊 Ridge Regression")
         if st.button("Train Ridge Regression"):
-            with st.spinner("Training Ridge Regression..."):
-                result = train_model("ridge_regression", X_train, X_test, y_train, y_test)
+            with st.spinner("Processing Ridge Regression..."):
+                result = train_model("ridge_regression", X_train, X_test, y_train, y_test, use_saved_models)
                 st.session_state.model_results['Ridge Regression'] = {
                     'model': result['model'],
                     'mse': result['metrics']['mse'],
                     'r2_score': result['metrics']['r2_score']
                 }
-                st.success("Ridge Regression trained successfully!")
+                # Show appropriate message based on what happened
+                if result.get('was_loaded', False):
+                    st.success("✅ Ridge Regression model loaded from saved file!")
+                else:
+                    st.success("🆕 Ridge Regression trained successfully!")
                 st.metric("MSE", f"{result['metrics']['mse']:.2f}")
                 st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
     
@@ -268,13 +290,20 @@ with tab1:
     with col3:
         st.subheader("🌲 Random Forest")
         if st.button("Train Random Forest"):
-            with st.spinner("Training Random Forest..."):
-                result = train_model("random_forest", X_train, X_test, y_train, y_test)
+            with st.spinner("Processing Random Forest..."):
+                result = train_model("random_forest", X_train, X_test, y_train, y_test, use_saved_models)
                 st.session_state.model_results['Random Forest'] = {
                     'model': result['model'],
                     'mse': result['metrics']['mse'],
                     'r2_score': result['metrics']['r2_score']
                 }
+                # Show appropriate message based on what happened
+                if result.get('was_loaded', False):
+                    st.success("✅ Random Forest model loaded from saved file!")
+                else:
+                    st.success("🆕 Random Forest trained successfully!")
+                st.metric("MSE", f"{result['metrics']['mse']:.2f}")
+                st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
                 st.success("Random Forest trained successfully!")
                 st.metric("MSE", f"{result['metrics']['mse']:.2f}")
                 st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
@@ -419,10 +448,9 @@ with tab4:
     if 'model_results' not in st.session_state or len(st.session_state.model_results) == 0:
         X = df.drop('charges', axis=1)
         y = df['charges']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)        
         # Train Linear Regression
-        lr_result = train_model("linear_regression", X_train, X_test, y_train, y_test)
+        lr_result = train_model("linear_regression", X_train, X_test, y_train, y_test, use_saved_models)
         st.session_state.model_results['Linear Regression'] = {
             'model': lr_result['model'],
             'mse': lr_result['metrics']['mse'],
@@ -430,7 +458,7 @@ with tab4:
         }
         
         # Train Ridge Regression
-        ridge_result = train_model("ridge_regression", X_train, X_test, y_train, y_test)
+        ridge_result = train_model("ridge_regression", X_train, X_test, y_train, y_test, use_saved_models)
         st.session_state.model_results['Ridge Regression'] = {
             'model': ridge_result['model'],
             'mse': ridge_result['metrics']['mse'],
@@ -438,7 +466,7 @@ with tab4:
         }
         
         # Train Random Forest
-        rf_result = train_model("random_forest", X_train, X_test, y_train, y_test)
+        rf_result = train_model("random_forest", X_train, X_test, y_train, y_test, use_saved_models)
         st.session_state.model_results['Random Forest'] = {
             'model': rf_result['model'],
             'mse': rf_result['metrics']['mse'],
