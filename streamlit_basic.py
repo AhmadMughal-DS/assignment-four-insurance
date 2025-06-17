@@ -11,9 +11,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 import mlflow
 import mlflow.sklearn
-import joblib
 from datetime import datetime
 import os
+import logging
+import socket
+import joblib
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Set page config with a beautiful theme
 st.set_page_config(
@@ -23,59 +29,90 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Initialize MLflow with error handling
+# Initialize MLflow with error handling - quietly fail if not available
 mlflow_available = False
 try:
     # Get MLflow tracking URI from environment variable or use default
-    mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI', 'http://localhost:5000')
+    default_uri = 'http://localhost:5000'
+    
+    # Check for EC2 environment - try multiple environment variables
+    ec2_ip = os.getenv('EC2_PUBLIC_IP') or os.getenv('EC2_IP') or os.getenv('PUBLIC_IP')
+    if ec2_ip:
+        default_uri = f"http://{ec2_ip}:5000"
+        logger.info(f"Using EC2 public IP: {ec2_ip}")
+    
+    mlflow_tracking_uri = os.getenv('MLFLOW_TRACKING_URI', default_uri)
+    logger.info(f"Setting MLflow tracking URI to: {mlflow_tracking_uri}")
+    
+    # Set MLflow tracking URI first
     mlflow.set_tracking_uri(mlflow_tracking_uri)
-    mlflow.set_experiment("Insurance Cost Prediction")
-    mlflow_available = True
+    
+    # Test connection to MLflow server
+    try:
+        # Extract host and port safely
+        if '://' in mlflow_tracking_uri:
+            host_part = mlflow_tracking_uri.split('://')[1]
+        else:
+            host_part = mlflow_tracking_uri
+            
+        if ':' in host_part:
+            host = host_part.split(':')[0]
+            port_str = host_part.split(':')[1].split('/')[0]
+            try:
+                port = int(port_str)
+            except ValueError:
+                port = 5000
+        else:
+            host = host_part
+            port = 5000
+            
+        logger.info(f"Testing connection to MLflow at {host}:{port}")
+        
+        # Try to ping the server
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        
+        if result == 0:
+            logger.info("Successfully connected to MLflow server")
+        else:
+            logger.error(f"Could not connect to MLflow server at {mlflow_tracking_uri}")
+            raise ConnectionError("MLflow server connection failed")
+    except Exception as e:
+        logger.error(f"Failed to connect to MLflow server: {str(e)}")
+        raise
+    
+    # Create mlruns directory
+    try:
+        os.makedirs('mlruns', exist_ok=True)
+        logger.info("Created or confirmed mlruns directory")
+    except PermissionError:
+        logger.warning("Permission error creating mlruns directory")
+    
+    # Set experiment
+    experiment_name = "Insurance Cost Prediction"
+    try:
+        experiment = mlflow.get_experiment_by_name(experiment_name)
+        if experiment is None:
+            logger.info(f"Creating new experiment: {experiment_name}")
+            experiment_id = mlflow.create_experiment(experiment_name)
+        else:
+            experiment_id = experiment.experiment_id
+            logger.info(f"Using existing experiment: {experiment_name} (ID: {experiment_id})")
+        
+        mlflow.set_experiment(experiment_name)
+        mlflow_available = True
+        logger.info("MLflow initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to set up MLflow experiment: {str(e)}")
+        raise
+        
 except Exception as e:
-    st.warning("MLflow tracking is not available. Running without experiment tracking.")
-
-# Function to save model individually
-def save_model_separately(model, model_name):
-    try:
-        # Create models directory if it doesn't exist
-        os.makedirs("models", exist_ok=True)
-        
-        # Save the model with a specific filename
-        model_path = f"models/{model_name}.joblib"
-        joblib.dump(model, model_path)
-        # st.success(f"💾 Model saved to {model_path}")  # Remove this to avoid duplicate messages
-    except Exception as e:
-        st.warning(f"Could not save model: {str(e)}")
-
-# Function to load saved model
-def load_saved_model(model_name, use_saved=True):
-    if not use_saved:
-        return None
-        
-    try:
-        # Check if there's a specific saved model file for this model type
-        model_paths = {
-            "linear_regression": "models/linear_regression.joblib",
-            "ridge_regression": "models/ridge_regression.joblib", 
-            "random_forest": "models/random_forest.joblib"
-        }        # First try to load from models directory
-        if model_name in model_paths and os.path.exists(model_paths[model_name]):
-            import joblib
-            model = joblib.load(model_paths[model_name])
-            # st.info(f"✅ Loaded saved {model_name} model from models folder!")  # Remove this duplicate message
-            return model
-            
-        # Fallback: try to load from MLflow artifacts (but this loads same model for all)
-        # We'll disable this to force training fresh models
-        # model_path = f"mlruns/606562906264104841/b7c3ccd120a3471b8be5e905d112c3fb/artifacts/insurance_model"
-        # if os.path.exists(model_path):
-        #     model = mlflow.sklearn.load_model(model_path)
-        #     st.success(f"Successfully loaded saved {model_name} model!")
-        #     return model
-            
-    except Exception as e:
-        st.warning(f"Could not load saved model: {str(e)}")
-    return None
+    logger.error(f"Failed to initialize MLflow: {str(e)}")
+    # Just log error, don't show to user
+    logger.info("Running without MLflow experiment tracking.")
+    mlflow_available = False
 
 # Custom CSS for better styling
 st.markdown("""
@@ -112,55 +149,111 @@ def load_data():
     df['region'] = pd.Categorical(df['region']).codes
     return df
 
+# Functions to load and save models
+@st.cache_resource
+def load_model(model_name):
+    """Load a saved model if it exists with caching for improved performance"""
+    model_path = os.path.join('models', f"{model_name}.joblib")
+    if os.path.exists(model_path):
+        logger.info(f"Loading saved model: {model_path}")
+        try:
+            return joblib.load(model_path)
+        except Exception as e:
+            logger.error(f"Error loading model {model_path}: {str(e)}")
+    
+    return None
+
+def save_model(model, model_name):
+    """Save a model to disk"""
+    # Create models directory if it doesn't exist
+    os.makedirs('models', exist_ok=True)
+    
+    model_path = os.path.join('models', f"{model_name}.joblib")
+    logger.info(f"Saving model to {model_path}")
+    try:
+        joblib.dump(model, model_path)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving model {model_path}: {str(e)}")
+        return False
+            # Cached function to get model metrics for faster predictions
+@st.cache_data
+def get_model_metrics(model_name, X_test, y_test):
+    """Get model metrics with caching to avoid recomputation"""
+    model = load_model(model_name)
+    if model is None:
+        return None
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    
+    # Calculate metrics
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    
+    return {
+        'mse': mse,
+        'r2_score': r2
+    }
+
+# Fast predict function - efficiently makes prediction with a given model name
+@st.cache_data
+def fast_predict(model_name, input_data):
+    """Make a prediction using a model without loading full model details"""
+    model = load_model(model_name)
+    if model is None:
+        return None
+        
+    return model.predict(input_data)[0]
+
 df = load_data()
 
 # Sidebar for parameters with better styling
 with st.sidebar:
     st.header("⚙️ Model Parameters")
-    
-    # Option to use saved models or train fresh
-    use_saved_models = st.checkbox("Use Saved Models", value=True, 
-                                  help="Uncheck to train fresh models instead of using saved ones")
-    
     test_size = st.slider("Test Size", 0.1, 0.4, 0.2, 0.05)
     random_state = st.number_input("Random State", 1, 100, 42)
+    use_saved_models = st.checkbox("Use saved models if available", value=True, 
+                                  help="If checked, will load saved models instead of training new ones when possible.")
 
 # Create tabs with emojis
 tab1, tab2, tab3, tab4 = st.tabs(["🤖 Model Training", "📊 Data Analysis", "🔍 Feature Insights", "🎯 Predictions"])
 
-# Function to train model with MLflow tracking
+# Function to train model with MLflow tracking, using saved models if available
 def train_model(model_name, X_train, X_test, y_train, y_test, use_saved=True):
-    global mlflow_available
+    # First try to load a saved model if requested
+    saved_model = None
+    if use_saved:
+        if model_name == "linear_regression":
+            saved_model = load_model("linear_regression")
+        elif model_name == "ridge_regression":
+            saved_model = load_model("ridge_regression")
+        elif model_name == "random_forest":
+            saved_model = load_model("random_forest")
     
-    # Show what we're trying to do (remove this to avoid duplicate messages)
-    # if use_saved:
-    #     st.info(f"🔍 Checking for saved {model_name} model...")
-    # else:
-    #     st.info(f"🆕 Training fresh {model_name} model...")
-    
-    # First try to load the saved model (only if use_saved is True)
-    saved_model = load_saved_model(model_name, use_saved)
+    # If we successfully loaded a saved model, use it
     if saved_model is not None:
-        # Make predictions with saved model
-        y_pred = saved_model.predict(X_test)
+        logger.info(f"Using saved model: {model_name}")
+        model = saved_model
         
-        # Calculate metrics
+        # Calculate metrics using saved model
+        y_pred = model.predict(X_test)
         mse = mean_squared_error(y_test, y_pred)
         r2 = r2_score(y_test, y_pred)
         
         return {
-            'model': saved_model,
+            'model': model,
             'metrics': {
                 'mse': mse,
                 'r2_score': r2
             },
-            'was_loaded': True  # Add flag to indicate model was loaded
+            'loaded_from_saved': True
         }
     
-    # If we reach here, we need to train a fresh model
-    # st.info(f"🔄 Training fresh {model_name} model...")  # Remove this duplicate message
+    # Otherwise, train a new model
+    logger.info(f"Training new model: {model_name}")
     
-    # If no saved model, train a new one
+    global mlflow_available
     if mlflow_available:
         try:
             with mlflow.start_run(run_name=f"{model_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"):
@@ -186,14 +279,16 @@ def train_model(model_name, X_train, X_test, y_train, y_test, use_saved=True):
                 # Calculate metrics
                 mse = mean_squared_error(y_test, y_pred)
                 r2 = r2_score(y_test, y_pred)
-                  # Log metrics
+                
+                # Log metrics
                 mlflow.log_metric("mse", mse)
                 mlflow.log_metric("r2_score", r2)
-                  # Log model
+                
+                # Log model
                 mlflow.sklearn.log_model(model, model_name)
                 
-                # Save model separately for future use
-                save_model_separately(model, model_name)
+                # Save model locally
+                save_model(model, model_name)
                 
                 return {
                     'model': model,
@@ -201,10 +296,12 @@ def train_model(model_name, X_train, X_test, y_train, y_test, use_saved=True):
                         'mse': mse,
                         'r2_score': r2
                     },
-                    'was_loaded': False  # Fresh training with MLflow
+                    'loaded_from_saved': False
                 }
         except Exception as e:
-            st.warning(f"MLflow tracking failed: {str(e)}. Continuing without tracking.")
+            # Log error but don't show in UI
+            logger.error(f"MLflow tracking failed: {str(e)}")
+            logger.info("Continuing without MLflow tracking.")
             mlflow_available = False
     
     # If MLflow is not available or failed, train without tracking
@@ -217,22 +314,23 @@ def train_model(model_name, X_train, X_test, y_train, y_test, use_saved=True):
     
     # Train model
     model.fit(X_train, y_train)
-      # Make predictions
+    
+    # Make predictions
     y_pred = model.predict(X_test)
     
     # Calculate metrics
     mse = mean_squared_error(y_test, y_pred)
     r2 = r2_score(y_test, y_pred)
-      # Save model separately for future use
-    save_model_separately(model, model_name)
+    
+    # Save the model
+    save_model(model, model_name)
     
     return {
         'model': model,
         'metrics': {
             'mse': mse,
             'r2_score': r2
-        },
-        'was_loaded': False  # Fresh training without MLflow
+        }
     }
 
 with tab1:
@@ -248,63 +346,61 @@ with tab1:
     
     # Dictionary to store model results
     if 'model_results' not in st.session_state:
-        st.session_state.model_results = {}    # Linear Regression Model
+        st.session_state.model_results = {}
+      # Linear Regression Model
     with col1:
         st.subheader("📈 Linear Regression")
-        if st.button("Train Linear Regression"):
-            with st.spinner("Processing Linear Regression..."):
+        button_text = "Load/Train Linear Regression"
+        if st.button(button_text):
+            with st.spinner("Loading or Training Linear Regression..."):
                 result = train_model("linear_regression", X_train, X_test, y_train, y_test, use_saved_models)
                 st.session_state.model_results['Linear Regression'] = {
                     'model': result['model'],
                     'mse': result['metrics']['mse'],
                     'r2_score': result['metrics']['r2_score']
                 }
-                # Show appropriate message based on what happened
-                if result.get('was_loaded', False):
-                    st.success("✅ Linear Regression model loaded from saved file!")
+                if result.get('loaded_from_saved', False):
+                    st.success("Linear Regression loaded from saved model!")
                 else:
-                    st.success("🆕 Linear Regression trained successfully!")
+                    st.success("Linear Regression trained and saved successfully!")
                 st.metric("MSE", f"{result['metrics']['mse']:.2f}")
                 st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
     
     # Ridge Regression Model
     with col2:
         st.subheader("📊 Ridge Regression")
-        if st.button("Train Ridge Regression"):
-            with st.spinner("Processing Ridge Regression..."):
+        button_text = "Load/Train Ridge Regression"
+        if st.button(button_text):
+            with st.spinner("Loading or Training Ridge Regression..."):
                 result = train_model("ridge_regression", X_train, X_test, y_train, y_test, use_saved_models)
                 st.session_state.model_results['Ridge Regression'] = {
                     'model': result['model'],
                     'mse': result['metrics']['mse'],
                     'r2_score': result['metrics']['r2_score']
                 }
-                # Show appropriate message based on what happened
-                if result.get('was_loaded', False):
-                    st.success("✅ Ridge Regression model loaded from saved file!")
+                if result.get('loaded_from_saved', False):
+                    st.success("Ridge Regression loaded from saved model!")
                 else:
-                    st.success("🆕 Ridge Regression trained successfully!")
+                    st.success("Ridge Regression trained and saved successfully!")
                 st.metric("MSE", f"{result['metrics']['mse']:.2f}")
                 st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
     
     # Random Forest Model
     with col3:
         st.subheader("🌲 Random Forest")
-        if st.button("Train Random Forest"):
-            with st.spinner("Processing Random Forest..."):
+        button_text = "Load/Train Random Forest"
+        if st.button(button_text):
+            with st.spinner("Loading or Training Random Forest..."):
                 result = train_model("random_forest", X_train, X_test, y_train, y_test, use_saved_models)
                 st.session_state.model_results['Random Forest'] = {
                     'model': result['model'],
                     'mse': result['metrics']['mse'],
                     'r2_score': result['metrics']['r2_score']
                 }
-                # Show appropriate message based on what happened
-                if result.get('was_loaded', False):
-                    st.success("✅ Random Forest model loaded from saved file!")
+                if result.get('loaded_from_saved', False):
+                    st.success("Random Forest loaded from saved model!")
                 else:
-                    st.success("🆕 Random Forest trained successfully!")
-                st.metric("MSE", f"{result['metrics']['mse']:.2f}")
-                st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
-                st.success("Random Forest trained successfully!")
+                    st.success("Random Forest trained and saved successfully!")
                 st.metric("MSE", f"{result['metrics']['mse']:.2f}")
                 st.metric("R2 Score", f"{result['metrics']['r2_score']:.2f}")
     
@@ -442,41 +538,26 @@ with tab4:
     with col2:
         children = st.number_input("Number of Children", min_value=0, max_value=10, value=0)
         smoker = st.selectbox("Smoker", ["yes", "no"])
-        region = st.selectbox("Region", ["southwest", "southeast", "northwest", "northeast"])
+        region = st.selectbox("Region", ["southwest", "southeast", "northwest", "northeast"])    # Initialize models and metrics dictionaries for predictions
+    # Only compute metrics if needed, skip full model loading
+    X = df.drop('charges', axis=1)
+    y = df['charges']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # Train all models if not already trained
-    if 'model_results' not in st.session_state or len(st.session_state.model_results) == 0:
-        X = df.drop('charges', axis=1)
-        y = df['charges']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)        
-        # Train Linear Regression
-        lr_result = train_model("linear_regression", X_train, X_test, y_train, y_test, use_saved_models)
-        st.session_state.model_results['Linear Regression'] = {
-            'model': lr_result['model'],
-            'mse': lr_result['metrics']['mse'],
-            'r2_score': lr_result['metrics']['r2_score']
-        }
-        
-        # Train Ridge Regression
-        ridge_result = train_model("ridge_regression", X_train, X_test, y_train, y_test, use_saved_models)
-        st.session_state.model_results['Ridge Regression'] = {
-            'model': ridge_result['model'],
-            'mse': ridge_result['metrics']['mse'],
-            'r2_score': ridge_result['metrics']['r2_score']
-        }
-        
-        # Train Random Forest
-        rf_result = train_model("random_forest", X_train, X_test, y_train, y_test, use_saved_models)
-        st.session_state.model_results['Random Forest'] = {
-            'model': rf_result['model'],
-            'mse': rf_result['metrics']['mse'],
-            'r2_score': rf_result['metrics']['r2_score']
-        }
+    # Fast loading of model results - only when needed
+    if 'model_results' not in st.session_state:
+        st.session_state.model_results = {}
     
-    # Model selection
+    # Define the available models
+    available_models = {
+        'Linear Regression': 'linear_regression',
+        'Ridge Regression': 'ridge_regression',
+        'Random Forest': 'random_forest'
+    }
+      # Model selection
     selected_model = st.selectbox(
         "Select Model for Detailed Analysis",
-        list(st.session_state.model_results.keys()),
+        list(available_models.keys()),
         format_func=lambda x: f"🤖 {x}"
     )
     
@@ -491,20 +572,43 @@ with tab4:
             'region': [['southwest', 'southeast', 'northwest', 'northeast'].index(region)]
         })
         
-        # Get predictions from all models
-        predictions = {}
-        for model_name, model_data in st.session_state.model_results.items():
-            pred = model_data['model'].predict(input_data)[0]
-            predictions[model_name] = {
-                'prediction': pred,
-                'confidence': model_data['r2_score']
-            }
+        # Get predictions from all models - load models only when needed
+        with st.spinner("Generating predictions..."):
+            predictions = {}
+            
+            for display_name, model_name in available_models.items():
+                # Check if we already have this model in session state
+                if display_name in st.session_state.model_results and 'model' in st.session_state.model_results[display_name]:
+                    model = st.session_state.model_results[display_name]['model']
+                    metrics = {
+                        'mse': st.session_state.model_results[display_name]['mse'],
+                        'r2_score': st.session_state.model_results[display_name]['r2_score']
+                    }
+                else:
+                    # Load model directly (cached function)
+                    model = load_model(model_name)
+                    if model is None:
+                        st.error(f"Could not load model: {model_name}. Please train it first.")
+                        continue
+                    
+                    # Get metrics (cached function)
+                    metrics = get_model_metrics(model_name, X_test, y_test)
+                    if metrics is None:
+                        metrics = {'mse': 0, 'r2_score': 0}
+                  # Make prediction with fast cached function
+                pred = fast_predict(model_name, input_data)
+                if pred is not None:
+                    predictions[display_name] = {
+                        'prediction': pred,
+                        'confidence': metrics['r2_score']
+                    }
         
         # Display selected model's prediction prominently
         st.subheader(f"🎯 Selected Model: {selected_model}")
-        selected_pred = predictions[selected_model]
-        st.metric("Predicted Insurance Cost", f"${selected_pred['prediction']:.2f}")
-        st.info(f"Model Confidence: {selected_pred['confidence']:.2%}")
+        if selected_model in predictions:
+            selected_pred = predictions[selected_model]
+            st.metric("Predicted Insurance Cost", f"${selected_pred['prediction']:.2f}")
+            st.info(f"Model Confidence: {selected_pred['confidence']:.2%}")
         
         # Show comparison with other models
         st.subheader("📊 Comparison with Other Models")
@@ -549,4 +653,4 @@ with tab4:
 # Display data info in sidebar
 st.sidebar.header("Dataset Information")
 st.sidebar.write("Number of samples:", len(df))
-st.sidebar.write("Features:", ", ".join(df.columns)) 
+st.sidebar.write("Features:", ", ".join(df.columns))
